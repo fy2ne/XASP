@@ -1,0 +1,12 @@
+[package]
+name = "xasp-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Self-contained 4-core CPU loopback TCP benchmark suite and chart generator for XASP"
+
+[dependencies]
+xasp-math = { path = "../xasp-math" }
+xasp-tcp = { path = "../xasp-tcp" }
+xasp-tpu-ffi = { path = "../xasp-tpu-ffi" }

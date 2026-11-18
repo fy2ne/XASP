@@ -1,0 +1,9 @@
+[package]
+name = "xasp-math"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "In-place 128-lane physical TPU tile FWHT, Christoffel leverage stratification, and Polar/QJL kernels"
+
+[dependencies]

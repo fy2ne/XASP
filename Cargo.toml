@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/xasp-math",
+    "crates/xasp-tcp",
+    "crates/xasp-tpu-ffi",
+    "crates/xasp-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["fy2ne <https://xasp.fy2ne.me>"]
+license = "PolyForm-Noncommercial-1.0.0"
+repository = "https://github.com/fy2ne/XASP"
+homepage = "https://xasp.fy2ne.me"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = false

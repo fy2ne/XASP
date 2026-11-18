@@ -1,0 +1,15 @@
+[package]
+name = "xasp-tpu-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Zero-copy C-ABI and Python vLLM V1 connector bridge over google/tpu-sync 128-lane physical tiles"
+
+[lib]
+name = "xasp_tpu"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+xasp-math = { path = "../xasp-math" }
+xasp-tcp = { path = "../xasp-tcp" }

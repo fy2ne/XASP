@@ -1,0 +1,10 @@
+[package]
+name = "xasp-tcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "K=16 striped TCP transport, 64-byte XaspTcpFrameHeader, deadline assembler, and late-frame drainer"
+
+[dependencies]
+xasp-math = { path = "../xasp-math" }
