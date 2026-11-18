@@ -37,7 +37,7 @@ fn main() {
 
     let tile = generate_outlier_tpu_tile(512, 0x2026_1118);
     let net_stats = run_live_loopback_16stream(&tile);
-    let sweep = run_staging_sweep(net_stats.wire_compression_ratio, 8);
+    let sweep = run_staging_sweep(net_stats.wire_compression_ratio, 8, &net_stats.sample_frames);
     let acc_rows = run_accuracy_matrix(&tile);
 
     // Chart 1 CSV
@@ -92,9 +92,10 @@ fn main() {
     render_chart3(&acc_rows, &charts_dir.join("chart3_accuracy_rmse_compression.png")).unwrap();
 
     println!(
-        "xasp-bench ok: cores={} cpu_encode={:.2} GB/s ratio={:.2}x ({:.2} b/coord) layers={} wall={:.2}ms drained={} ({}B)",
+        "xasp-bench ok: cores={} cpu_encode={:.2} GB/s cpu_decode={:.2} GB/s ratio={:.2}x ({:.2} b/coord) layers={} wall={:.2}ms drained={} ({}B)",
         net_stats.cpu_cores_used,
         net_stats.encode_gb_per_sec,
+        net_stats.decode_gb_per_sec,
         net_stats.wire_compression_ratio,
         net_stats.avg_bits_per_coord,
         net_stats.layers_transferred,

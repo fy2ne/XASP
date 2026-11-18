@@ -92,7 +92,9 @@ pub fn decode_stratum0_payload(
             row_idx: row_cursor as u16,
             rho_x_f16,
             rho_r_f16,
-            q_codes: [0u8; 128],
+            q_plane0: 0,
+            q_plane1: 0,
+            q_plane2: 0,
             qjl_signs: 0,
         });
         row_cursor += 1;

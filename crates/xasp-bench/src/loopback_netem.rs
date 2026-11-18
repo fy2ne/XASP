@@ -5,23 +5,30 @@
 //      Source-available on https://github.com/fy2ne/xasp (not distributed via crates.io).
 
 use crate::tile_gen::SyntheticKvTile;
+use std::collections::VecDeque;
+use std::io::Write;
 use std::time::{Duration, Instant};
 use xasp_math::polar_qjl::encode_bulk_row;
-use xasp_math::{Bf16, LocalSpectralCodec, TileTransportBackend, decode_layer_half};
+use xasp_math::{
+    Bf16, EncodedLayerHalf, LocalSpectralCodec, TileTransportBackend, decode_layer_half,
+    decode_layer_half_into,
+};
 use xasp_tcp::deadline_rx::DeadlineAssembler;
 use xasp_tcp::pool::bind_loopback_pair;
-use xasp_tcp::stripe_mux::mux_encoded_half;
+use xasp_tcp::stripe_mux::{MuxedFrame, NUM_STREAMS, mux_encoded_half};
 
 #[derive(Clone, Debug)]
 pub struct LoopbackPerfStats {
     pub cpu_cores_used: usize,
     pub encode_gb_per_sec: f64,
+    pub decode_gb_per_sec: f64,
     pub wire_compression_ratio: f64,
     pub avg_bits_per_coord: f64,
     pub layers_transferred: usize,
     pub loopback_wall_ms: f64,
     pub late_drained_frames: u64,
     pub late_drained_bytes: u64,
+    pub sample_frames: Vec<MuxedFrame>,
 }
 
 #[derive(Clone, Debug)]
@@ -34,12 +41,12 @@ pub struct AccuracyBenchRow {
     pub delta_ppl_proxy: f64,
 }
 
-pub fn measure_cpu_throughput_gbps(tile: &SyntheticKvTile) -> (usize, f64) {
+pub fn measure_cpu_throughput_gbps(tile: &SyntheticKvTile) -> (usize, f64, f64) {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
         .min(4);
-    let iters_per_thread = 32usize;
+    let iters_per_thread = 256usize;
     let raw_bytes_per_iter = tile.n_rows * 128 * 2 * 2;
     let total_bytes = (cores * iters_per_thread * raw_bytes_per_iter) as f64;
 
@@ -48,25 +55,65 @@ pub fn measure_cpu_throughput_gbps(tile: &SyntheticKvTile) -> (usize, f64) {
         for tid in 0..cores {
             scope.spawn(move || {
                 let codec = LocalSpectralCodec::default();
+                let mut k_out = EncodedLayerHalf::default();
+                let mut v_out = EncodedLayerHalf::default();
                 for iter in 0..iters_per_thread {
-                    let _ = codec.encode_kv_layer(
+                    codec.encode_kv_layer_into(
                         &tile.keys,
                         &tile.values,
                         tile.n_rows,
                         2,
                         1000 + (tid as u64),
                         iter as u16,
+                        &mut k_out,
+                        &mut v_out,
                     );
                 }
             });
         }
     });
-    let elapsed = t0.elapsed().as_secs_f64().max(1e-6);
-    (cores, total_bytes / elapsed / 1e9)
+    let enc_elapsed = t0.elapsed().as_secs_f64().max(1e-6);
+
+    let codec = LocalSpectralCodec::default();
+    let (sample_k, sample_v) =
+        codec.encode_kv_layer(&tile.keys, &tile.values, tile.n_rows, 2, 1000, 0);
+    let mask_1_stall = u128::MAX ^ (((1u128 << 9) - 1) << 45);
+
+    let t1 = Instant::now();
+    std::thread::scope(|scope| {
+        for tid in 0..cores {
+            let sk = &sample_k;
+            let sv = &sample_v;
+            scope.spawn(move || {
+                let mut k_dst = vec![Bf16::default(); tile.n_rows * 128];
+                let mut v_dst = vec![Bf16::default(); tile.n_rows * 128];
+                for iter in 0..iters_per_thread {
+                    decode_layer_half_into(
+                        sk,
+                        mask_1_stall,
+                        1000 + (tid as u64),
+                        iter as u16,
+                        false,
+                        &mut k_dst,
+                    );
+                    decode_layer_half_into(
+                        sv,
+                        mask_1_stall,
+                        1000 + (tid as u64),
+                        iter as u16,
+                        true,
+                        &mut v_dst,
+                    );
+                }
+            });
+        }
+    });
+    let dec_elapsed = t1.elapsed().as_secs_f64().max(1e-6);
+    (cores, total_bytes / enc_elapsed / 1e9, total_bytes / dec_elapsed / 1e9)
 }
 
 pub fn run_live_loopback_16stream(tile: &SyntheticKvTile) -> LoopbackPerfStats {
-    let (cores, encode_gbps) = measure_cpu_throughput_gbps(tile);
+    let (cores, encode_gbps, decode_gbps) = measure_cpu_throughput_gbps(tile);
     let (mut tx, mut rx) = bind_loopback_pair(0).expect("bind 16 loopback tcp streams");
     let mut asm = DeadlineAssembler::new();
     let codec = LocalSpectralCodec::default();
@@ -85,22 +132,44 @@ pub fn run_live_loopback_16stream(tile: &SyntheticKvTile) -> LoopbackPerfStats {
     let avg_bits_per_coord = 16.0 / compression_ratio;
 
     let t0 = Instant::now();
-    let mut joiners = Vec::new();
+    let mut queues: Vec<VecDeque<(Instant, Vec<u8>)>> =
+        (0..NUM_STREAMS).map(|_| VecDeque::new()).collect();
+    let mut ready_at = [Instant::now(); NUM_STREAMS];
+
     for l in 0..n_layers {
         let frames = mux_encoded_half(&sample_k, false, 404, 0, l as u16, (l % 4) as u8, 1_000_000);
-        // inject DCN micro-burst stall on stream 7 every 4th layer
-        let stall_mask = if l % 4 == 1 { 1u16 << 7 } else { 0 };
-        if stall_mask == 0 {
-            DeadlineAssembler::send_frames(&mut tx, &frames).unwrap();
-        } else if let Some(h) = DeadlineAssembler::send_frames_with_stalls(
-            &mut tx,
-            &frames,
-            stall_mask,
-            Duration::from_millis(8),
-        )
-        .unwrap()
-        {
-            joiners.push(h);
+        let stall_sid = if l % 4 == 1 { Some(7usize) } else { None };
+        let now = Instant::now();
+
+        for sid in 0..NUM_STREAMS {
+            while let Some((t, _)) = queues[sid].front() {
+                if *t <= now {
+                    let (_, b) = queues[sid].pop_front().unwrap();
+                    tx.streams[sid].write_all(&b).unwrap();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        for frame in frames {
+            let sid = frame.header.stream_id as usize;
+            let stall = if Some(sid) == stall_sid {
+                Duration::from_millis(8)
+            } else {
+                Duration::ZERO
+            };
+            if stall.is_zero() && queues[sid].is_empty() && ready_at[sid] <= now {
+                tx.streams[sid].write_all(&frame.header.to_bytes()).unwrap();
+                tx.streams[sid].write_all(&frame.payload).unwrap();
+            } else {
+                let mut wire = Vec::with_capacity(64 + frame.payload.len());
+                wire.extend_from_slice(&frame.header.to_bytes());
+                wire.extend_from_slice(&frame.payload);
+                let release = ready_at[sid].max(now) + stall;
+                ready_at[sid] = release;
+                queues[sid].push_back((release, wire));
+            }
         }
 
         let _assembled = asm
@@ -113,22 +182,40 @@ pub fn run_live_loopback_16stream(tile: &SyntheticKvTile) -> LoopbackPerfStats {
             .unwrap();
     }
 
-    for h in joiners {
-        h.join().unwrap();
+    loop {
+        let now = Instant::now();
+        let mut any = false;
+        for sid in 0..NUM_STREAMS {
+            while let Some((t, _)) = queues[sid].front() {
+                if *t <= now {
+                    let (_, b) = queues[sid].pop_front().unwrap();
+                    tx.streams[sid].write_all(&b).unwrap();
+                } else {
+                    any = true;
+                    break;
+                }
+            }
+        }
+        if !any {
+            break;
+        }
+        std::thread::yield_now();
     }
-    std::thread::sleep(Duration::from_millis(4));
+    std::thread::sleep(Duration::from_millis(1));
     asm.drain_late_frames(&mut rx).unwrap();
     let wall_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     LoopbackPerfStats {
         cpu_cores_used: cores,
         encode_gb_per_sec: encode_gbps,
+        decode_gb_per_sec: decode_gbps,
         wire_compression_ratio: compression_ratio,
         avg_bits_per_coord,
         layers_transferred: n_layers,
         loopback_wall_ms: wall_ms,
         late_drained_frames: asm.stats.late_drained_frames,
         late_drained_bytes: asm.stats.late_drained_bytes,
+        sample_frames,
     }
 }
 

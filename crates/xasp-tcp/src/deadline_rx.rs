@@ -243,7 +243,7 @@ impl DeadlineAssembler {
             if Instant::now() >= deadline + Duration::from_millis(200) && !vip_ready {
                 return Err(io::Error::new(ErrorKind::TimedOut, "stratum0 vip missed deadline"));
             }
-            thread::sleep(Duration::from_micros(50));
+            thread::yield_now();
         }
 
         self.filter.mark_retired(request_id_lo, layer_id);

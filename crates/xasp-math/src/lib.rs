@@ -10,10 +10,12 @@ pub mod fwht;
 pub mod polar_qjl;
 pub mod rademacher;
 
-use christoffel::{VipRowInt8, stratify_tile_rows};
-use estimator::{reconstruct_bulk_row, write_reconstructed_row_bf16};
+use christoffel::{VipRowInt8, stratify_tile_fast_into};
+use estimator::{reconstruct_bulk_rows_into_tile, write_reconstructed_row_bf16};
+use fwht::has_avx2;
 use polar_qjl::{BulkEncodedRow, encode_bulk_row_with_masks};
 use rademacher::rademacher_mask_128;
+use std::cell::RefCell;
 
 pub const MINOR_TILE_DIM: usize = 128;
 
@@ -87,7 +89,7 @@ pub fn f16_to_f32(h: u16) -> f32 {
     f32::from_bits(sign | ((exp + 127 - 15) << 23) | (mant << 13))
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct EncodedLayerHalf {
     pub n_rows: usize,
     pub quant_bits: u8,
@@ -122,13 +124,123 @@ impl Default for LocalSpectralCodec {
     }
 }
 
-fn read_bf16_row(src: &[Bf16], row_idx: usize) -> [f32; 128] {
-    let mut out = [0.0f32; 128];
-    let off = row_idx * 128;
-    for lane in 0..128 {
-        out[lane] = src[off + lane].to_f32();
+#[derive(Default)]
+struct CodecScratch {
+    sketched: Vec<[f32; 8]>,
+    v_sq: Vec<f32>,
+    is_vip: Vec<bool>,
+    vip_rows: Vec<u16>,
+    bulk_rows: Vec<u16>,
+    ranked: Vec<(usize, f32)>,
+}
+
+thread_local! {
+    static CODEC_SCRATCH: RefCell<CodecScratch> = RefCell::new(CodecScratch::default());
+}
+
+impl LocalSpectralCodec {
+    pub fn encode_kv_layer_into(
+        &self,
+        keys: &[Bf16],
+        values: &[Bf16],
+        n_rows: usize,
+        quant_bits: u8,
+        request_id_lo: u64,
+        layer_id: u16,
+        k_out: &mut EncodedLayerHalf,
+        v_out: &mut EncodedLayerHalf,
+    ) {
+        let k_phi = rademacher_mask_128(request_id_lo, layer_id, 0x1111_2222);
+        let k_psi = rademacher_mask_128(request_id_lo, layer_id, 0x3333_4444);
+        let v_phi = rademacher_mask_128(request_id_lo ^ 0xA5A5_5A5A, layer_id, 0x1111_2222);
+        let v_psi = rademacher_mask_128(request_id_lo ^ 0xA5A5_5A5A, layer_id, 0x3333_4444);
+
+        k_out.n_rows = n_rows;
+        k_out.quant_bits = quant_bits;
+        k_out.vip_rows.clear();
+        k_out.bulk_rows.clear();
+        v_out.n_rows = n_rows;
+        v_out.quant_bits = quant_bits;
+        v_out.vip_rows.clear();
+        v_out.bulk_rows.clear();
+
+        CODEC_SCRATCH.with(|cell| {
+            let mut sc = cell.borrow_mut();
+            let sc = &mut *sc;
+
+            stratify_tile_fast_into(
+                keys,
+                values,
+                n_rows,
+                self.vip_ratio,
+                self.sink_rows,
+                request_id_lo,
+                layer_id,
+                &mut sc.sketched,
+                &mut sc.v_sq,
+                &mut sc.is_vip,
+                &mut sc.vip_rows,
+                &mut sc.bulk_rows,
+                &mut sc.ranked,
+            );
+
+            k_out.vip_rows.reserve(sc.vip_rows.len());
+            v_out.vip_rows.reserve(sc.vip_rows.len());
+            for &r in &sc.vip_rows {
+                let off = (r as usize) * 128;
+                k_out.vip_rows.push(VipRowInt8::pack_bf16(r, &keys[off..off + 128]));
+                v_out.vip_rows.push(VipRowInt8::pack_bf16(r, &values[off..off + 128]));
+            }
+
+            k_out.bulk_rows.reserve(sc.bulk_rows.len());
+            v_out.bulk_rows.reserve(sc.bulk_rows.len());
+
+            if has_avx2() {
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    let k_phi_vecs = rademacher::build_avx2_sign_vecs(k_phi);
+                    let k_psi_vecs = rademacher::build_avx2_sign_vecs(k_psi);
+                    let v_phi_vecs = rademacher::build_avx2_sign_vecs(v_phi);
+                    let v_psi_vecs = rademacher::build_avx2_sign_vecs(v_psi);
+                    let kp = keys.as_ptr();
+                    let vp = values.as_ptr();
+                    for &r in &sc.bulk_rows {
+                        let off = (r as usize) * 128;
+                        k_out.bulk_rows.push(polar_qjl::encode_bf16_row_fused_avx2(
+                            r,
+                            kp.add(off),
+                            quant_bits,
+                            &k_phi_vecs,
+                            &k_psi_vecs,
+                        ));
+                        v_out.bulk_rows.push(polar_qjl::encode_bf16_row_fused_avx2(
+                            r,
+                            vp.add(off),
+                            quant_bits,
+                            &v_phi_vecs,
+                            &v_psi_vecs,
+                        ));
+                    }
+                }
+            } else {
+                let mut kf = [0.0f32; 128];
+                let mut vf = [0.0f32; 128];
+                for &r in &sc.bulk_rows {
+                    let off = (r as usize) * 128;
+                    for c in 0..128 {
+                        kf[c] = keys[off + c].to_f32();
+                        vf[c] = values[off + c].to_f32();
+                    }
+                    k_out.bulk_rows.push(encode_bulk_row_with_masks(
+                        r, &kf, quant_bits, k_phi, k_psi,
+                    ));
+                    v_out.bulk_rows.push(encode_bulk_row_with_masks(
+                        r, &vf, quant_bits, v_phi, v_psi,
+                    ));
+                }
+            }
+        });
     }
-    out
 }
 
 impl TileTransportBackend for LocalSpectralCodec {
@@ -141,54 +253,50 @@ impl TileTransportBackend for LocalSpectralCodec {
         request_id_lo: u64,
         layer_id: u16,
     ) -> (EncodedLayerHalf, EncodedLayerHalf) {
-        let split = stratify_tile_rows(
+        let mut k_out = EncodedLayerHalf::default();
+        let mut v_out = EncodedLayerHalf::default();
+        self.encode_kv_layer_into(
             keys,
             values,
             n_rows,
-            self.vip_ratio,
-            self.sink_rows,
+            quant_bits,
             request_id_lo,
             layer_id,
+            &mut k_out,
+            &mut v_out,
         );
-
-        let mut k_vip = Vec::with_capacity(split.vip_rows.len());
-        let mut v_vip = Vec::with_capacity(split.vip_rows.len());
-        for &r in &split.vip_rows {
-            let kr = read_bf16_row(keys, r as usize);
-            let vr = read_bf16_row(values, r as usize);
-            k_vip.push(VipRowInt8::pack(r, &kr));
-            v_vip.push(VipRowInt8::pack(r, &vr));
-        }
-
-        let k_phi = rademacher_mask_128(request_id_lo, layer_id, 0x1111_2222);
-        let k_psi = rademacher_mask_128(request_id_lo, layer_id, 0x3333_4444);
-        let v_phi = rademacher_mask_128(request_id_lo ^ 0xA5A5_5A5A, layer_id, 0x1111_2222);
-        let v_psi = rademacher_mask_128(request_id_lo ^ 0xA5A5_5A5A, layer_id, 0x3333_4444);
-
-        let mut k_bulk = Vec::with_capacity(split.bulk_rows.len());
-        let mut v_bulk = Vec::with_capacity(split.bulk_rows.len());
-        for &r in &split.bulk_rows {
-            let kr = read_bf16_row(keys, r as usize);
-            let vr = read_bf16_row(values, r as usize);
-            k_bulk.push(encode_bulk_row_with_masks(r, &kr, quant_bits, k_phi, k_psi));
-            v_bulk.push(encode_bulk_row_with_masks(r, &vr, quant_bits, v_phi, v_psi));
-        }
-
-        (
-            EncodedLayerHalf {
-                n_rows,
-                quant_bits,
-                vip_rows: k_vip,
-                bulk_rows: k_bulk,
-            },
-            EncodedLayerHalf {
-                n_rows,
-                quant_bits,
-                vip_rows: v_vip,
-                bulk_rows: v_bulk,
-            },
-        )
+        (k_out, v_out)
     }
+}
+
+pub fn decode_layer_half_into(
+    half: &EncodedLayerHalf,
+    arrived_mask: u128,
+    request_id_lo: u64,
+    layer_id: u16,
+    is_value: bool,
+    dst: &mut [Bf16],
+) {
+    let seed = if is_value {
+        request_id_lo ^ 0xA5A5_5A5A
+    } else {
+        request_id_lo
+    };
+
+    for vip in &half.vip_rows {
+        let mut row_f = [0.0f32; 128];
+        vip.unpack_into(&mut row_f);
+        write_reconstructed_row_bf16(dst, vip.row_idx as usize, &row_f);
+    }
+
+    reconstruct_bulk_rows_into_tile(
+        &half.bulk_rows,
+        arrived_mask,
+        half.quant_bits,
+        seed,
+        layer_id,
+        dst,
+    );
 }
 
 pub fn decode_layer_half(
@@ -199,22 +307,7 @@ pub fn decode_layer_half(
     is_value: bool,
 ) -> Vec<Bf16> {
     let mut dst = vec![Bf16::default(); half.n_rows * 128];
-    let seed = if is_value {
-        request_id_lo ^ 0xA5A5_5A5A
-    } else {
-        request_id_lo
-    };
-
-    for vip in &half.vip_rows {
-        let mut row_f = [0.0f32; 128];
-        vip.unpack_into(&mut row_f);
-        write_reconstructed_row_bf16(&mut dst, vip.row_idx as usize, &row_f);
-    }
-
-    for bulk in &half.bulk_rows {
-        let row_f = reconstruct_bulk_row(bulk, arrived_mask, half.quant_bits, seed, layer_id);
-        write_reconstructed_row_bf16(&mut dst, bulk.row_idx as usize, &row_f);
-    }
+    decode_layer_half_into(half, arrived_mask, request_id_lo, layer_id, is_value, &mut dst);
     dst
 }
 
@@ -315,7 +408,6 @@ mod tests {
         let k_dec = decode_layer_half(&k_enc, stalled_mask, 9001, 5, false);
         let v_dec = decode_layer_half(&v_enc, stalled_mask, 9001, 5, true);
 
-        // Build query aligned with sink row 0 so attention concentrates on VIP stratum (P_S1 <= 0.15)
         let mut q = [0.0f32; 128];
         for c in 0..128 {
             q[c] = keys[c].to_f32() * 0.05 + lcg_f32(&mut s) * 0.25;

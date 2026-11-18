@@ -35,3 +35,22 @@ pub fn apply_signs_128(row: &mut [f32; 128], mask: u128) {
         }
     }
 }
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub unsafe fn build_avx2_sign_vecs(mask: u128) -> [std::arch::x86_64::__m256; 16] {
+    use std::arch::x86_64::*;
+
+    let mut out = [_mm256_setzero_ps(); 16];
+    for chunk in 0..16 {
+        let byte = ((mask >> (chunk * 8)) & 0xFF) as i32;
+        let mut arr = [0u32; 8];
+        for b in 0..8 {
+            if ((byte >> b) & 1) != 0 {
+                arr[b] = 0x8000_0000;
+            }
+        }
+        out[chunk] = _mm256_castsi256_ps(_mm256_loadu_si256(arr.as_ptr() as *const __m256i));
+    }
+    out
+}

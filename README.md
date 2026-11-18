@@ -2,9 +2,18 @@
 
 [![CI](https://github.com/fy2ne/XASP/actions/workflows/ci_and_bench.yml/badge.svg)](https://github.com/fy2ne/XASP/actions/workflows/ci_and_bench.yml)
 
-`XASP` is a pure-Rust server-side KV-cache transport engine built for disaggregated Google Cloud TPU serving (`google/tpu-sync`, `vllm-project/vllm-jax`, `vllm-project/vllm-torchtpu`) over 100% standard TCP (`TCP_NODELAY` + Linux `TCP_QUICKACK` / `SO_RCVLOWAT`).
+`XASP` is a pure-Rust, zero-dependency server-side KV-cache transport engine built for disaggregated Google Cloud TPU serving (`google/tpu-sync`, `vllm-project/vllm-jax`, `vllm-project/vllm-torchtpu`) over 100% standard TCP (`TCP_NODELAY` + Linux `TCP_QUICKACK` / `SO_RCVLOWAT`).
 
-External OpenAI HTTP/SSE clients and TPU Pallas attention kernels remain untouched. `XASP` operates strictly inside Host DRAM staging memory (`transfer_d2h_async` / `ExecuteLayerH2d`) directly along TPU's contiguous 128-lane physical minor tile axis.
+External OpenAI HTTP/SSE clients, PJRT descriptors, and TPU Pallas attention kernels remain untouched. `XASP` operates in Host DRAM staging memory (`transfer_d2h_async` / `ExecuteLayerH2d`) directly along TPU's contiguous 128-lane physical minor tile axis.
+
+---
+
+## Documentation Index
+
+- **[ARCHITECTURE.md](ARCHITECTURE.md):** Complete layer-by-layer and file-by-file breakdown of all 4 crates, SIMD register pipelines, socket framing, and C++17 integration.
+- **[docs/math_proofs.md](docs/math_proofs.md):** Formal proofs for Christoffel Ridge Leverage stratification (Proposition 1), 128-lane SRHT flattening, and unbiased `(1 - delta_hat)^-1` deadline reconstruction (Theorems 1-2).
+- **[docs/wire_protocol.md](docs/wire_protocol.md):** 64-byte `XaspTcpFrameHeader` wire specification, `K=16` stream assignment, and retired-layer late-frame drainer.
+- **[crates/xasp-tpu-ffi/include/xasp_tpu_sync_adapter.hpp](crates/xasp-tpu-ffi/include/xasp_tpu_sync_adapter.hpp):** Single-header C++17 drop-in adapter (`xasp::RaidenStagingAdapter`) outputting `XaspStripeIovec` descriptors for `google/peregrine` `Post()` and `RawBufferTransport`.
 
 ---
 
@@ -15,26 +24,21 @@ External OpenAI HTTP/SSE clients and TPU Pallas attention kernels remain untouch
 
 ---
 
-## Architecture
+## Live Benchmark Results (`xasp-bench`, 1:1 Real-Time 16-Socket Loopback)
 
-- **`crates/xasp-math`**: Layer I subsampled Christoffel / Ridge Leverage stratification (`vip_rows` top 5% + 4 attention sinks in `INT8`), Layer II in-place `AVX2` / scalar 128-lane Fast Walsh-Hadamard Transform (`896` add/sub ops per row), Two-Stage Polar Lloyd-Max + 1-bit QJL residual compression, and unbiased `(1 - delta_hat)^-1` deadline reconstruction.
-- **`crates/xasp-tcp`**: Cache-line-aligned 64-byte `XaspTcpFrameHeader` with hardware SSE4.2 `CRC32C`, `K=16` persistent striped TCP connection pool (`0..1` Priority VIP redundant streams, `2..15` Bulk coordinate streams), deadline assembler, and retired-layer late-frame drainer.
-- **`crates/xasp-tpu-ffi`**: Zero-copy 128-lane physical tile pointer validator (`xasp_check_folded_device_layout`), C-ABI shared library (`libxasp_tpu.so` / `xasp_tpu.dll`), and Python `XaspConnector` adapter for `KVConnectorBase_V1`.
-- **`crates/xasp-bench`**: Self-contained 16-socket loopback TCP benchmark suite and chart generator with synthetic `[512, 128]` `BF16` outlier tiles (`30x` minor-lane spikes + 4 attention sinks).
+Measured with `RUSTFLAGS="-C target-cpu=native"` on a 2-core / 4-thread Intel Core i3-4160 (`@ 3.60 GHz`):
+- **CPU Encode Throughput:** `2.10 GB/s` (fused in-register `AVX2` + Christoffel `r=8` sketch, `~1.05 GB/s` per physical core).
+- **CPU Decode Throughput:** `2.33 GB/s` (compile-time 256-entry L1 LUT bitplane expansion + inverse `AVX2` FWHT + `BF16` store).
+- **Wire Reduction:** `6.26x` (`2.56 bits/coord` average at `b=2`, `VIP=5.0%`).
+- **Late Frame Draining:** `12` delayed frames (`13,896 B`) drained cleanly across retired layers with zero socket resets.
 
-See [Mathematical Proofs](docs/math_proofs.md) and [Wire Protocol Specification](docs/wire_protocol.md).
-
----
-
-## Benchmark Results (`xasp-bench`, 16 Loopback TCP Streams)
-
-| DCN Micro-Burst Stall Prob | Raw TPU-Sync P99 (ms) | Raw Session Abort Rate | XASP K=16 P99 (ms) | XASP Abort Rate | Wire Compression |
-| :---: | :---: | :---: | :---: | :---: | :---: |
-| `0.0%` | `230.0 ms` | `0.0%` | `36.7 ms` | `0.0%` | `6.26x` (`2.56 b/coord`) |
-| `0.2%` | `490.9 ms` | `0.5%` | `36.7 ms` | `0.0%` | `6.26x` (`2.56 b/coord`) |
-| `0.5%` | `634.2 ms` | `9.0%` | `36.8 ms` | `0.0%` | `6.26x` (`2.56 b/coord`) |
-| `1.0%` | `906.8 ms` | `46.2%` | `36.8 ms` | `0.0%` | `6.26x` (`2.56 b/coord`) |
-| `2.0%` | `980.0 ms` | `91.5%` | `36.8 ms` | `0.0%` | `6.26x` (`2.56 b/coord`) |
+| DCN Micro-Burst Stall Prob | Raw TPU-Sync P99 (ms) | Raw Session Abort Rate | Raw Avg Slots | XASP K=16 P99 (ms) | XASP Abort Rate | XASP Avg Slots |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `0.0%` | `238.0 ms` | `0.0%` | `0.65 / 8` | `38.4 ms` | `0.0%` | `1.00 / 8` |
+| `0.2%` | `531.5 ms` | `37.5%` | `1.48 / 8` | `38.3 ms` | `0.0%` | `1.00 / 8` |
+| `0.5%` | `535.9 ms` | `37.5%` | `1.94 / 8` | `39.2 ms` | `0.0%` | `1.00 / 8` |
+| `1.0%` | `526.0 ms` | `50.0%` | `2.51 / 8` | `40.3 ms` | `0.0%` | `1.00 / 8` |
+| `2.0%` | `545.5 ms` | `100.0%` | `3.45 / 8` | `83.8 ms` | `0.0%` | `1.00 / 8` |
 
 ![Chart 1: DCN Transfer Cliff and Abort Rate](docs/assets/chart1_dcn_transfer_cliff.png)
 
@@ -46,8 +50,9 @@ See [Mathematical Proofs](docs/math_proofs.md) and [Wire Protocol Specification]
 | :--- | :---: | :---: | :---: | :---: |
 | `XASP (b=4, VIP=5.0%)` | `3.59x` | `0` | `1.18%` | `0.0000` |
 | `XASP (b=3, VIP=5.0%)` | `4.56x` | `1` | `1.29%` | `0.0000` |
-| `XASP (b=2, VIP=5.0%)` | `6.26x` | `1` | `1.44%` | `0.0000` |
-| `XASP (b=2, VIP=5.0%)` | `6.26x` | `2` | `1.58%` | `0.0001` |
+| `XASP (b=2, VIP=5.0%)` | `6.26x` | `1` | `1.43%` | `0.0000` |
+| `XASP (b=2, VIP=5.0%)` | `6.26x` | `2` | `1.57%` | `0.0001` |
+| `XASP (b=2, VIP=2.5%)` | `6.66x` | `1` | `16.20%` | `0.0006` |
 | `QJL-Only (No VIP, b=2)` | `7.11x` | `1` | `60.89%` | `0.0044` |
 | `Naive Byte Stripe` | `4.00x` | `2` | `34.55%` | `0.0000` |
 | `Unstratified Scalar INT` | `8.00x` | `1` | `231.95%` | `0.1066` |
