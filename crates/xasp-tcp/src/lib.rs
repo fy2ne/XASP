@@ -15,8 +15,9 @@ mod tests {
     use crate::frame::{XASP_MAGIC, XASP_VERSION, XaspTcpFrameHeader};
     use crate::pool::bind_loopback_pair;
     use crate::stripe_mux::mux_encoded_half;
+    use std::io::Write;
     use std::time::{Duration, Instant};
-    use xasp_math::{Bf16, LocalSpectralCodec, TileTransportBackend};
+    use xasp_math::{Bf16, LocalSpectralCodec};
 
     #[test]
     fn frame_header_size_align_and_crc32c_roundtrip() {
@@ -71,14 +72,27 @@ mod tests {
         let frames = mux_encoded_half(&k_half, false, 777, 1, 1, 0, 1_000_000);
 
         let mut asm = DeadlineAssembler::new();
-        // stall stream 7 past the 15ms deadline
-        let joiner = DeadlineAssembler::send_frames_with_stalls(
-            &mut tx,
-            &frames,
-            1u16 << 7,
-            Duration::from_millis(35),
-        )
-        .unwrap();
+        // stall stream 7 past the 12ms deadline
+        let mut delayed_sock = None;
+        let mut delayed_bytes = Vec::new();
+        for f in &frames {
+            let sid = f.header.stream_id as usize;
+            let hdr_bytes = f.header.to_bytes();
+            if sid == 7 {
+                delayed_sock = Some(tx.streams[sid].try_clone().unwrap());
+                delayed_bytes.extend_from_slice(&hdr_bytes);
+                delayed_bytes.extend_from_slice(&f.payload);
+            } else {
+                tx.streams[sid].write_all(&hdr_bytes).unwrap();
+                tx.streams[sid].write_all(&f.payload).unwrap();
+            }
+        }
+        let joiner = delayed_sock.map(|mut sock| {
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(35));
+                let _ = sock.write_all(&delayed_bytes);
+            })
+        });
 
         let assembled = asm
             .collect_layer_until_deadline(&mut rx, 777, 1, Instant::now() + Duration::from_millis(12))

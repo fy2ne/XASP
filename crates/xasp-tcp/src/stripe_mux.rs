@@ -130,7 +130,7 @@ pub fn mux_encoded_half(
             stream_id: s,
             stratum_tier: TIER_STRATUM0_VIP,
             staging_slot_idx,
-            quant_bits_br: 8,
+            quant_bits_br: half.quant_bits,
             layer_id,
             coord_start: 0,
             coord_count: half.vip_rows.len() as u16,

@@ -37,7 +37,7 @@ fn main() {
 
     let tile = generate_outlier_tpu_tile(512, 0x2026_1118);
     let net_stats = run_live_loopback_16stream(&tile);
-    let sweep = run_staging_sweep(net_stats.wire_compression_ratio, 8, &net_stats.sample_frames);
+    let sweep = run_staging_sweep(8, &net_stats.sample_frames);
     let acc_rows = run_accuracy_matrix(&tile);
 
     // Chart 1 CSV

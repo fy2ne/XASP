@@ -11,14 +11,6 @@ use crate::{Bf16, f16_to_f32, f32_to_f16};
 const SKETCH_DIM: usize = 8;
 
 #[derive(Clone, Debug)]
-pub struct StratumSplit {
-    pub is_vip: Vec<bool>,
-    pub vip_rows: Vec<u16>,
-    pub bulk_rows: Vec<u16>,
-    pub scores: Vec<f32>,
-}
-
-#[derive(Clone, Debug)]
 pub struct VipRowInt8 {
     pub row_idx: u16,
     pub scale_f16: u16,
@@ -46,8 +38,10 @@ impl VipRowInt8 {
             }
         }
 
-        let step = if amax > 1e-8 { amax / 127.0 } else { 1e-8 };
-        let inv = _mm256_set1_ps(1.0 / step);
+        let raw_step = if amax > 1e-8 { amax / 127.0 } else { 1e-8 };
+        let scale_f16 = f32_to_f16(raw_step);
+        let step_q = f16_to_f32(scale_f16).max(1e-8);
+        let inv = _mm256_set1_ps(1.0 / step_q);
         let lo_c = _mm256_set1_ps(-127.0);
         let hi_c = _mm256_set1_ps(127.0);
         let mut q = [0i8; 128];
@@ -69,7 +63,7 @@ impl VipRowInt8 {
 
         Self {
             row_idx,
-            scale_f16: f32_to_f16(step),
+            scale_f16,
             q,
         }
     }
@@ -82,15 +76,17 @@ impl VipRowInt8 {
                 amax = abs;
             }
         }
-        let step = if amax > 1e-8 { amax / 127.0 } else { 1e-8 };
-        let inv = 1.0 / step;
+        let raw_step = if amax > 1e-8 { amax / 127.0 } else { 1e-8 };
+        let scale_f16 = f32_to_f16(raw_step);
+        let step_q = f16_to_f32(scale_f16).max(1e-8);
+        let inv = 1.0 / step_q;
         let mut q = [0i8; 128];
         for lane in 0..128 {
             q[lane] = (row[lane] * inv).round().clamp(-127.0, 127.0) as i8;
         }
         Self {
             row_idx,
-            scale_f16: f32_to_f16(step),
+            scale_f16,
             q,
         }
     }
@@ -212,15 +208,10 @@ unsafe fn sketch_row_avx2(
     let sk_scaled = _mm256_mul_ps(sk, _mm256_set1_ps(0.25));
     _mm256_storeu_ps(k_sketch_out, sk_scaled);
 
-    let hsum = |v: __m256| -> f32 {
-        let hi = _mm256_extractf128_ps(v, 1);
-        let lo = _mm256_castps256_ps128(v);
-        let s4 = _mm_add_ps(lo, hi);
-        let s2 = _mm_add_ps(s4, _mm_movehl_ps(s4, s4));
-        let s1 = _mm_add_ss(s2, _mm_shuffle_ps(s2, s2, 0x01));
-        _mm_cvtss_f32(s1)
-    };
-    (hsum(k_sq_acc), hsum(v_sq_acc))
+    (
+        crate::polar_qjl::hsum256_ps(k_sq_acc),
+        crate::polar_qjl::hsum256_ps(v_sq_acc),
+    )
 }
 
 pub fn stratify_tile_fast_into(
@@ -352,50 +343,5 @@ pub fn stratify_tile_fast_into(
         } else {
             bulk_rows_out.push(idx as u16);
         }
-    }
-}
-
-pub fn stratify_tile_rows(
-    keys: &[Bf16],
-    values: &[Bf16],
-    n_rows: usize,
-    vip_ratio: f32,
-    sink_rows: usize,
-    request_id_lo: u64,
-    layer_id: u16,
-) -> StratumSplit {
-    let mut sketched_buf = Vec::new();
-    let mut v_sq_buf = Vec::new();
-    let mut is_vip = Vec::new();
-    let mut vip_rows = Vec::new();
-    let mut bulk_rows = Vec::new();
-    let mut ranked = Vec::new();
-
-    stratify_tile_fast_into(
-        keys,
-        values,
-        n_rows,
-        vip_ratio,
-        sink_rows,
-        request_id_lo,
-        layer_id,
-        &mut sketched_buf,
-        &mut v_sq_buf,
-        &mut is_vip,
-        &mut vip_rows,
-        &mut bulk_rows,
-        &mut ranked,
-    );
-
-    let mut scores = vec![0.0f32; n_rows];
-    for &(idx, sc) in &ranked {
-        scores[idx] = sc;
-    }
-
-    StratumSplit {
-        is_vip,
-        vip_rows,
-        bulk_rows,
-        scores,
     }
 }

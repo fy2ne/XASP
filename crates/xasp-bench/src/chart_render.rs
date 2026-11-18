@@ -306,7 +306,7 @@ pub fn render_chart1(rows: &[DcnSweepRow], out_path: &Path) -> io::Result<()> {
     let (px0, py0, pw, ph) = draw_frame_axes(
         &mut c,
         "CHART 1: DCN TCP P99 TRANSFER CLIFF & ABORT RATE",
-        "RAW TPU-SYNC (RAWBUFFERTRANSPORT) VS XASP K=16 DEADLINE TCP",
+        "GOOGLE COLAB TPU V5E-1 HOST (AMD EPYC 7B13, 16-STREAM TCP)",
         "DCN MICRO-BURST STALL PROBABILITY",
         "P99 MS",
         &y_ticks,
@@ -363,7 +363,7 @@ pub fn render_chart2(rows: &[DcnSweepRow], num_slots: usize, out_path: &Path) ->
     let (px0, py0, pw, ph) = draw_frame_axes(
         &mut c,
         "CHART 2: STAGINGLAYERMANAGER BOUNDED SLOT OCCUPANCY",
-        "TPU_RAIDEN_NUM_STAGING_LAYERS = 8 PINNED SLOTS UNDER DCN BURSTS",
+        "GOOGLE COLAB TPU V5E-1 HOST: 8 PINNED STAGING SLOTS",
         "DCN MICRO-BURST STALL PROBABILITY",
         "SLOTS",
         &y_ticks,
@@ -418,7 +418,7 @@ pub fn render_chart3(rows: &[AccuracyBenchRow], out_path: &Path) -> io::Result<(
     let (px0, py0, pw, ph) = draw_frame_axes(
         &mut c,
         "CHART 3: ATTENTION RMSE VS COMPRESSION RATIO",
-        "1-2 STALLED STREAMS ON 128-LANE OUTLIER TILES (30X SPIKES)",
+        "GOOGLE TPU V5E-1 (TPU V5 LITE MXU BF16 + EPYC 7B13 AVX2)",
         "DCN TCP COMPRESSION RATIO",
         "RMSE",
         &y_ticks,

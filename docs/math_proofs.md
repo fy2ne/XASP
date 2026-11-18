@@ -20,7 +20,7 @@ $$\sup_{q \in \mathbb{R}^{128} \setminus \{0\}} \frac{|\langle q, k_i \rangle|^2
 
 ### Fast Sketch & Two-Stratum TCP Assignment
 
-Using a subsampled $r = 32$ sketch $\tilde{K} \in \mathbb{R}^{N \times 32}$, `xasp-math` solves $\tilde{K}^\top \tilde{K} + \mu I_{32}$ in $O(N r^2 + r^3)$ to obtain approximate scores $\tilde{\tau}_i(\mu)$. Locking the initial 4 Attention Sinks ($i < 4$) and ranking rows by
+Using a subsampled $r = 8$ CountSketch/Rademacher projection $\tilde{K} \in \mathbb{R}^{N \times 8}$ (covariance accumulated across strided rows), `xasp-math` solves $\tilde{K}^\top \tilde{K} + \mu I_{8}$ via $8 \times 8$ Cholesky inversion (`invert_spd_8`) to obtain approximate scores $\tilde{\tau}_i(\mu)$. Locking the initial 4 Attention Sinks ($i < 4$) and ranking rows by
 
 $$s_i = \infty \cdot \mathbb{I}(i < 4) + \tilde{\tau}_i(\mu) \cdot \|v_i\|_2$$
 

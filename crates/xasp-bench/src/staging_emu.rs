@@ -149,6 +149,13 @@ fn flush_all_pending(tx: &mut StripedTcpTxPool, queues: &mut [VecDeque<(Instant,
     }
 }
 
+const DCN_CONGESTED_LINK_GBPS: f64 = 0.0728;
+
+#[inline]
+fn wire_pace_for_bytes(wire_bytes: usize) -> Duration {
+    Duration::from_secs_f64((wire_bytes as f64 * 8.0) / (DCN_CONGESTED_LINK_GBPS * 1e9))
+}
+
 fn send_raw_16streams_pipelined(
     pool_size: usize,
     raw_layer_bytes: usize,
@@ -163,9 +170,10 @@ fn send_raw_16streams_pipelined(
 
     let staging = Arc::new(StagingLayerPool::new(pool_size));
     let per_stream_bytes = (raw_layer_bytes / NUM_STREAMS).max(64);
+    let actual_layer_wire_bytes = per_stream_bytes * NUM_STREAMS;
     let session_abort_ms = 520.0f64;
     let session_deadline = Instant::now() + Duration::from_millis(session_abort_ms as u64);
-    let layer_pace = Duration::from_micros((230_000.0 / (n_layers as f64)) as u64);
+    let layer_pace = wire_pace_for_bytes(actual_layer_wire_bytes);
 
     let mut rx_streams = rx.streams;
     let payload = vec![0x5Au8; per_stream_bytes];
@@ -261,11 +269,14 @@ fn send_xasp_16streams_deadline(
     n_layers: usize,
     p_stall: f64,
     rng: &mut u64,
-    compression_ratio: f64,
 ) -> (f64, bool, f64) {
     let staging = Arc::new(StagingLayerPool::new(pool_size));
-    let xasp_session_ms = 230.0 / compression_ratio;
-    let layer_pace = Duration::from_micros(((xasp_session_ms * 1000.0) / (n_layers as f64)) as u64);
+    let actual_wire_bytes: usize = sample_frames
+        .iter()
+        .filter(|f| f.header.stream_id != 1)
+        .map(|f| 64 + f.payload.len())
+        .sum();
+    let layer_pace = wire_pace_for_bytes(actual_wire_bytes);
     let tau_l = Duration::from_micros(1_200);
 
     let mut queues: Vec<VecDeque<(Instant, Vec<u8>)>> =
@@ -343,7 +354,6 @@ fn send_xasp_16streams_deadline(
 
 /// Executes 1:1 real-time 16-socket loopback TCP sessions gated by StagingLayerPool (Condvar + Mutex).
 pub fn run_staging_sweep(
-    compression_ratio: f64,
     num_staging_slots: usize,
     sample_frames: &[MuxedFrame],
 ) -> Vec<DcnSweepRow> {
@@ -372,7 +382,7 @@ pub fn run_staging_sweep(
                     for _ in 0..per_worker {
                         let (r_ms, r_abt, r_occ) = send_raw_16streams_pipelined(
                             num_staging_slots,
-                            16 * 1024,
+                            128 * 1024,
                             n_layers,
                             p_stall,
                             &mut rng,
@@ -404,7 +414,6 @@ pub fn run_staging_sweep(
                 n_layers,
                 p_stall,
                 &mut rng,
-                compression_ratio,
             );
             xasp_lats.push(x_ms);
             if x_abt {

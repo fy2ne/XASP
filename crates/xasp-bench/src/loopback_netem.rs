@@ -10,8 +10,7 @@ use std::io::Write;
 use std::time::{Duration, Instant};
 use xasp_math::polar_qjl::encode_bulk_row;
 use xasp_math::{
-    Bf16, EncodedLayerHalf, LocalSpectralCodec, TileTransportBackend, decode_layer_half,
-    decode_layer_half_into,
+    Bf16, EncodedLayerHalf, LocalSpectralCodec, decode_layer_half, decode_layer_half_into,
 };
 use xasp_tcp::deadline_rx::DeadlineAssembler;
 use xasp_tcp::pool::bind_loopback_pair;
@@ -45,7 +44,7 @@ pub fn measure_cpu_throughput_gbps(tile: &SyntheticKvTile) -> (usize, f64, f64) 
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
-        .min(4);
+        .min(16);
     let iters_per_thread = 256usize;
     let raw_bytes_per_iter = tile.n_rows * 128 * 2 * 2;
     let total_bytes = (cores * iters_per_thread * raw_bytes_per_iter) as f64;

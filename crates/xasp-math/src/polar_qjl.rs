@@ -97,7 +97,7 @@ pub fn dequantize_lloyd_max(row: &BulkEncodedRow, lane: usize, quant_bits: u8) -
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
-unsafe fn hsum256_ps(v: std::arch::x86_64::__m256) -> f32 {
+pub(crate) unsafe fn hsum256_ps(v: std::arch::x86_64::__m256) -> f32 {
     use std::arch::x86_64::*;
     let hi = _mm256_extractf128_ps(v, 1);
     let lo = _mm256_castps256_ps128(v);
@@ -255,24 +255,6 @@ pub unsafe fn encode_bf16_row_fused_avx2(
     encode_regs_fused_avx2(row_idx, &mut vecs, rho_x_sq, quant_bits, psi_vecs)
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-pub unsafe fn encode_prerotated_avx2(
-    row_idx: u16,
-    tilde: &[f32; 128],
-    rho_x_sq: f32,
-    quant_bits: u8,
-    psi_vecs: &[std::arch::x86_64::__m256; 16],
-) -> BulkEncodedRow {
-    use std::arch::x86_64::*;
-    let mut vecs = [_mm256_setzero_ps(); 16];
-    let ptr = tilde.as_ptr();
-    for idx in 0..16 {
-        vecs[idx] = _mm256_loadu_ps(ptr.add(idx * 8));
-    }
-    encode_regs_fused_avx2(row_idx, &mut vecs, rho_x_sq, quant_bits, psi_vecs)
-}
-
 pub fn encode_prerotated_bulk_row(
     row_idx: u16,
     tilde: &[f32; 128],
@@ -343,8 +325,14 @@ pub fn encode_bulk_row_with_masks(
     {
         if has_avx2() {
             return unsafe {
+                use std::arch::x86_64::*;
+                let mut vecs = [_mm256_setzero_ps(); 16];
+                let ptr = tilde.as_ptr();
+                for idx in 0..16 {
+                    vecs[idx] = _mm256_loadu_ps(ptr.add(idx * 8));
+                }
                 let psi_vecs = build_avx2_sign_vecs(psi_mask);
-                encode_prerotated_avx2(row_idx, &tilde, norm_sq, quant_bits, &psi_vecs)
+                encode_regs_fused_avx2(row_idx, &mut vecs, norm_sq, quant_bits, &psi_vecs)
             };
         }
     }

@@ -5,9 +5,9 @@
 //      Source-available on https://github.com/fy2ne/xasp (not distributed via crates.io).
 
 use crate::frame::{FLAG_IS_VALUE_TENSOR, XaspTcpFrameHeader};
-use crate::pool::{StripedTcpRxPool, StripedTcpTxPool, rearm_quickack};
-use crate::stripe_mux::{MuxedFrame, NUM_STREAMS, decode_stratum0_payload, stream_coord_range};
-use std::io::{self, ErrorKind, Read, Write};
+use crate::pool::{StripedTcpRxPool, rearm_quickack};
+use crate::stripe_mux::{NUM_STREAMS, decode_stratum0_payload, stream_coord_range};
+use std::io::{self, ErrorKind, Read};
 use std::net::TcpStream;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -62,6 +62,7 @@ pub struct StreamReaderState {
     active_hdr: Option<XaspTcpFrameHeader>,
     body_buf: Vec<u8>,
     body_pos: usize,
+    stashed: Option<(XaspTcpFrameHeader, Vec<u8>)>,
 }
 
 impl StreamReaderState {
@@ -72,6 +73,7 @@ impl StreamReaderState {
             active_hdr: None,
             body_buf: Vec::new(),
             body_pos: 0,
+            stashed: None,
         }
     }
 
@@ -159,55 +161,6 @@ impl DeadlineAssembler {
         }
     }
 
-    pub fn send_frames(tx: &mut StripedTcpTxPool, frames: &[MuxedFrame]) -> io::Result<()> {
-        for frame in frames {
-            let sid = frame.header.stream_id as usize;
-            let hdr_bytes = frame.header.to_bytes();
-            tx.streams[sid].write_all(&hdr_bytes)?;
-            tx.streams[sid].write_all(&frame.payload)?;
-        }
-        Ok(())
-    }
-
-    pub fn send_frames_with_stalls(
-        tx: &mut StripedTcpTxPool,
-        frames: &[MuxedFrame],
-        stalled_mask: u16,
-        stall_duration: Duration,
-    ) -> io::Result<Option<thread::JoinHandle<()>>> {
-        let mut delayed: Vec<(usize, [u8; 64], Vec<u8>)> = Vec::new();
-        for frame in frames {
-            let sid = frame.header.stream_id as usize;
-            let hdr_bytes = frame.header.to_bytes();
-            if ((stalled_mask >> sid) & 1) != 0 {
-                delayed.push((sid, hdr_bytes, frame.payload.clone()));
-            } else {
-                tx.streams[sid].write_all(&hdr_bytes)?;
-                tx.streams[sid].write_all(&frame.payload)?;
-            }
-        }
-
-        if delayed.is_empty() {
-            return Ok(None);
-        }
-
-        // clone stalled sockets so background thread releases them after deadline
-        let mut owned = Vec::with_capacity(delayed.len());
-        for (sid, hdr, body) in delayed {
-            let dup = tx.streams[sid].try_clone()?;
-            owned.push((dup, hdr, body));
-        }
-
-        let handle = thread::spawn(move || {
-            thread::sleep(stall_duration);
-            for (mut sock, hdr, body) in owned {
-                let _ = sock.write_all(&hdr);
-                let _ = sock.write_all(&body);
-            }
-        });
-        Ok(Some(handle))
-    }
-
     pub fn collect_layer_until_deadline(
         &mut self,
         rx: &mut StripedTcpRxPool,
@@ -223,12 +176,28 @@ impl DeadlineAssembler {
                 if slots[sid].is_some() {
                     continue;
                 }
+                if let Some((hdr, body)) = self.readers[sid].stashed.take() {
+                    if self.filter.is_retired(hdr.request_id_lo, hdr.layer_id) {
+                        self.stats.late_drained_frames += 1;
+                        self.stats.late_drained_bytes += 64 + body.len() as u64;
+                    } else if hdr.request_id_lo == request_id_lo && hdr.layer_id == layer_id {
+                        slots[sid] = Some((hdr, body));
+                        arrived_streams += 1;
+                        continue;
+                    } else {
+                        // Future layer already read ahead; keep stashed until its turn
+                        self.readers[sid].stashed = Some((hdr, body));
+                        continue;
+                    }
+                }
                 if let Some((hdr, body)) =
                     self.readers[sid].poll_frame(&mut rx.streams[sid], &self.filter, &mut self.stats)?
                 {
                     if hdr.request_id_lo == request_id_lo && hdr.layer_id == layer_id {
                         slots[sid] = Some((hdr, body));
                         arrived_streams += 1;
+                    } else {
+                        self.readers[sid].stashed = Some((hdr, body));
                     }
                 }
             }
@@ -254,13 +223,7 @@ impl DeadlineAssembler {
             .ok_or_else(|| io::Error::new(ErrorKind::TimedOut, "missing stratum0"))?;
 
         let is_value = (vip_hdr.flags & FLAG_IS_VALUE_TENSOR) != 0;
-        let mut quant_bits = 2u8;
-        for sid in 2..NUM_STREAMS {
-            if let Some((hdr, _)) = &slots[sid] {
-                quant_bits = hdr.quant_bits_br;
-                break;
-            }
-        }
+        let quant_bits = vip_hdr.quant_bits_br.clamp(2, 4);
 
         let mut half: EncodedLayerHalf = decode_stratum0_payload(vip_body, quant_bits)
             .map_err(|msg| io::Error::new(ErrorKind::InvalidData, msg))?;
@@ -288,6 +251,14 @@ impl DeadlineAssembler {
 
     pub fn drain_late_frames(&mut self, rx: &mut StripedTcpRxPool) -> io::Result<()> {
         for sid in 0..NUM_STREAMS {
+            if let Some((hdr, body)) = self.readers[sid].stashed.take() {
+                if self.filter.is_retired(hdr.request_id_lo, hdr.layer_id) {
+                    self.stats.late_drained_frames += 1;
+                    self.stats.late_drained_bytes += 64 + body.len() as u64;
+                } else {
+                    self.readers[sid].stashed = Some((hdr, body));
+                }
+            }
             while let Some((_hdr, _body)) =
                 self.readers[sid].poll_frame(&mut rx.streams[sid], &self.filter, &mut self.stats)?
             {

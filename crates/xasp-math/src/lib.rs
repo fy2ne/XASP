@@ -97,18 +97,6 @@ pub struct EncodedLayerHalf {
     pub bulk_rows: Vec<BulkEncodedRow>,
 }
 
-pub trait TileTransportBackend {
-    fn encode_kv_layer(
-        &self,
-        keys: &[Bf16],
-        values: &[Bf16],
-        n_rows: usize,
-        quant_bits: u8,
-        request_id_lo: u64,
-        layer_id: u16,
-    ) -> (EncodedLayerHalf, EncodedLayerHalf);
-}
-
 #[derive(Clone, Debug)]
 pub struct LocalSpectralCodec {
     pub vip_ratio: f32,
@@ -241,10 +229,8 @@ impl LocalSpectralCodec {
             }
         });
     }
-}
 
-impl TileTransportBackend for LocalSpectralCodec {
-    fn encode_kv_layer(
+    pub fn encode_kv_layer(
         &self,
         keys: &[Bf16],
         values: &[Bf16],

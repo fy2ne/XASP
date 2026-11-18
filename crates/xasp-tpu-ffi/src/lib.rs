@@ -10,7 +10,7 @@ use tile_arena_view::{
     PhysicalTileArenaView, PhysicalTileArenaViewMut, check_folded_device_layout,
 };
 use xasp_math::polar_qjl::unpack_bulk_stripe_into;
-use xasp_math::{LocalSpectralCodec, TileTransportBackend, decode_layer_half};
+use xasp_math::{LocalSpectralCodec, decode_layer_half};
 use xasp_tcp::frame::{FLAG_IS_VALUE_TENSOR, XaspTcpFrameHeader};
 use xasp_tcp::stripe_mux::{
     MuxedFrame, decode_stratum0_payload, mux_encoded_half, stream_coord_range,
@@ -224,8 +224,8 @@ pub unsafe extern "C" fn xasp_decode_kv_from_wire_blob(
     let Some(vh) = v_vip_hdr else { return -15 };
     let Some(vb) = v_vip_body else { return -15 };
 
-    let k_qbits = k_bulk.first().map(|(h, _)| h.quant_bits_br).unwrap_or(2);
-    let v_qbits = v_bulk.first().map(|(h, _)| h.quant_bits_br).unwrap_or(2);
+    let k_qbits = kh.quant_bits_br.clamp(2, 4);
+    let v_qbits = vh.quant_bits_br.clamp(2, 4);
 
     let Ok(mut k_enc) = decode_stratum0_payload(kb, k_qbits) else {
         return -16;
