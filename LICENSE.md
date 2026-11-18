@@ -5,7 +5,7 @@ Copyright (c) 2026 fy2ne (https://xasp.fy2ne.me). All rights reserved.
 XASP is dual-licensed under:
 
 1. **Noncommercial License**: PolyForm Noncommercial License 1.0.0 (for academic research, noncommercial evaluation, and reproducibility benchmarks).
-2. **Commercial License**: Required for any commercial, production, or revenue-generating inference deployment (contact `fy2ne` via https://xasp.fy2ne.me).
+2. **Commercial License**: Required for any commercial, production, or revenue-generating inference deployment (contact `fy2ne` via hello@fy2ne.me).
 
 Note: Source-available exclusively on GitHub (`https://github.com/fy2ne/XASP`). Not published to `crates.io`.
 
