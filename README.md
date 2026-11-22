@@ -1,4 +1,4 @@
-# XASP: Cross-Subspace Anytime Strided Protocol
+# XASP: XLA-Aligned Spectral Protocol
 
 [![CI](https://github.com/fy2ne/XASP/actions/workflows/ci_and_bench.yml/badge.svg)](https://github.com/fy2ne/XASP/actions/workflows/ci_and_bench.yml)
 [![Open In Colab TPU Benchmark](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/fy2ne/XASP/blob/main/benchmarks/colab_tpu_v5e_parity.ipynb)
@@ -16,7 +16,7 @@ External OpenAI HTTP/SSE clients, PJRT descriptors, and TPU Pallas attention ker
 - **[docs/math_proofs.md](docs/math_proofs.md):** Formal proofs for Christoffel Ridge Leverage stratification (Proposition 1), 128-lane SRHT flattening, and unbiased `(1 - delta_hat)^-1` deadline reconstruction (Theorems 1-2).
 - **[docs/wire_protocol.md](docs/wire_protocol.md):** 64-byte `XaspTcpFrameHeader` wire specification, `K=16` stream assignment, and retired-layer late-frame drainer.
 - **[crates/xasp-tpu-ffi/include/xasp_tpu_sync_adapter.hpp](crates/xasp-tpu-ffi/include/xasp_tpu_sync_adapter.hpp):** Single-header C++17 drop-in adapter (`xasp::RaidenStagingAdapter`) outputting `XaspStripeIovec` descriptors for `google/peregrine` `Post()` and `RawBufferTransport`.
-- **[CONTRIBUTING.md](CONTRIBUTING.md):** Sole copyright assignment policy and Contributor License Agreement (CLA).
+- **[CONTRIBUTING.md](CONTRIBUTING.md):** Contribution guidelines under Apache-2.0.
 
 ---
 
