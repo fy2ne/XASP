@@ -1,8 +1,5 @@
-// Copyright (c) 2026 fy2ne (https://xasp.fy2ne.me). All rights reserved.
-// Dual-Licensed:
-//   1. Noncommercial Evaluation & Academic Research: PolyForm-Noncommercial-1.0.0
-//   2. Commercial / Production Deployment: Requires a paid Commercial License from fy2ne.
-//      Source-available on https://github.com/fy2ne/xasp (not distributed via crates.io).
+// Copyright (c) 2026 fy2ne
+// SPDX-License-Identifier: Apache-2.0
 
 pub mod tile_arena_view;
 

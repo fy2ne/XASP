@@ -10,10 +10,10 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["fy2ne <https://xasp.fy2ne.me>"]
+authors = ["fy2ne <https://github.com/fy2ne>"]
 license = "Apache-2.0"
 repository = "https://github.com/fy2ne/XASP"
-homepage = "https://xasp.fy2ne.me"
+homepage = "https://github.com/fy2ne/XASP"
 
 [profile.release]
 opt-level = 3
