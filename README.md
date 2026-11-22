@@ -111,6 +111,4 @@ Or click **Open In Colab** at the top of this README to run [benchmarks/colab_tp
 
 ## Licensing & Copyright
 
-Dual-licensed under **`PolyForm-Noncommercial-1.0.0`** (for academic research and noncommercial evaluation) and a **Commercial License** from `fy2ne` (`https://xasp.fy2ne.me`). See [LICENSE.md](LICENSE.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
-
-Note: Source-available exclusively on GitHub (`https://github.com/fy2ne/XASP`). Not distributed via `crates.io`.
+Licensed under the **Apache License, Version 2.0**. See [LICENSE](LICENSE) for details.

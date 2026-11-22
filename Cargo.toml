@@ -11,7 +11,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 authors = ["fy2ne <https://xasp.fy2ne.me>"]
-license = "PolyForm-Noncommercial-1.0.0"
+license = "Apache-2.0"
 repository = "https://github.com/fy2ne/XASP"
 homepage = "https://xasp.fy2ne.me"
 
